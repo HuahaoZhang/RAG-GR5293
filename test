@@ -1,0 +1,152 @@
+"""
+test_repetition_rate.py
+Tests cache effectiveness across different query repetition rates.
+Constructs datasets with 0%, 25%, 50%, 75%, 100% repetition rates
+and measures hit rate and latency at each level.
+
+Usage:
+    cd rag_project
+    python test_repetition_rate.py
+"""
+
+import json
+import os
+import sys
+import time
+import random
+from dotenv import load_dotenv
+
+load_dotenv()
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from src.retriever import DenseRetriever
+from src.generator import Generator
+from src.pipeline import V1Pipeline
+from src.evaluator import save_results
+
+# ── Config ──────────────────────────────────────────────────────────────────
+TOTAL_QUERIES   = 100    # total queries per experiment
+REPETITION_RATES = [0.0, 0.25, 0.50, 0.75, 1.0]
+UNIQUE_POOL_SIZE = 50    # how many unique questions to draw from
+RANDOM_SEED      = 42
+
+
+def build_query_sequence(unique_questions: list[str], repetition_rate: float, total: int) -> list[str]:
+    """
+    Build a sequence of `total` queries with the given repetition rate.
+
+    repetition_rate=0.0  → all unique questions, no repeats
+    repetition_rate=0.25 → 25% of queries are repeats of earlier questions
+    repetition_rate=1.0  → all queries are the same single question
+    """
+    random.seed(RANDOM_SEED)
+
+    n_unique   = max(1, round(total * (1 - repetition_rate)))
+    n_repeated = total - n_unique
+
+    # Pick the unique questions for this run
+    unique_sample = unique_questions[:n_unique]
+
+    # Repeated queries: randomly pick from the unique sample
+    repeated = random.choices(unique_sample, k=n_repeated)
+
+    # Interleave: unique first, then repeated
+    # (simulates real usage where repeats come after initial queries)
+    sequence = unique_sample + repeated
+    random.shuffle(sequence)
+    return sequence
+
+
+def run_repetition_test(pipeline: V1Pipeline, questions: list[str]) -> dict:
+    """Run a sequence of queries and return timing + cache stats."""
+    latencies = []
+    cache_hits = []
+
+    for q in questions:
+        t0 = time.perf_counter()
+        r  = pipeline.run(q)
+        wall_ms = (time.perf_counter() - t0) * 1000
+
+        # If cache hit, wall_ms is the real latency (near 0ms)
+        # If cache miss, use the pipeline's measured latency
+        if r.get("cache_hit"):
+            latencies.append(wall_ms)
+            cache_hits.append(True)
+        else:
+            latencies.append(r["total_latency_ms"])
+            cache_hits.append(False)
+
+    n = len(latencies)
+    sorted_lats = sorted(latencies)
+
+    return {
+        "n_queries"         : n,
+        "n_hits"            : sum(cache_hits),
+        "n_misses"          : n - sum(cache_hits),
+        "hit_rate"          : sum(cache_hits) / n,
+        "mean_latency_ms"   : sum(latencies) / n,
+        "p50_latency_ms"    : sorted_lats[n // 2],
+        "p95_latency_ms"    : sorted_lats[int(n * 0.95)],
+        "min_latency_ms"    : sorted_lats[0],
+        "max_latency_ms"    : sorted_lats[-1],
+    }
+
+
+def main():
+    print("Loading pipeline...")
+    retriever = DenseRetriever()
+    retriever.index_chunks()
+    generator = Generator()
+
+    with open("data/qa_pairs.json") as f:
+        qa_pairs = json.load(f)
+    unique_questions = [q["question"] for q in qa_pairs[:UNIQUE_POOL_SIZE]]
+
+    os.makedirs("results", exist_ok=True)
+    all_results = {}
+
+    print(f"\nRunning repetition rate test")
+    print(f"Total queries per run: {TOTAL_QUERIES}")
+    print(f"Unique question pool:  {UNIQUE_POOL_SIZE}")
+    print(f"Rates: {REPETITION_RATES}\n")
+    print(f"{'Rate':>6}  {'Queries':>8}  {'Hits':>6}  {'Hit Rate':>9}  {'Mean Lat':>10}  {'P50':>8}  {'P95':>8}")
+    print("─" * 70)
+
+    for rate in REPETITION_RATES:
+        # Fresh pipeline for each rate (empty cache)
+        pipeline = V1Pipeline(retriever, generator, top_k=5)
+
+        sequence = build_query_sequence(unique_questions, rate, TOTAL_QUERIES)
+        result   = run_repetition_test(pipeline, sequence)
+
+        label = f"{int(rate * 100)}%"
+        print(
+            f"{label:>6}  "
+            f"{result['n_queries']:>8}  "
+            f"{result['n_hits']:>6}  "
+            f"{result['hit_rate']:>8.1%}  "
+            f"{result['mean_latency_ms']:>9.0f}ms  "
+            f"{result['p50_latency_ms']:>7.0f}ms  "
+            f"{result['p95_latency_ms']:>7.0f}ms"
+        )
+
+        all_results[label] = result
+
+    # Save
+    out_path = "results/repetition_rate_test.json"
+    with open(out_path, "w") as f:
+        json.dump(all_results, f, indent=2)
+    print(f"\nSaved → {out_path}")
+
+    # Summary insight
+    rate_0   = all_results["0%"]["mean_latency_ms"]
+    rate_100 = all_results["100%"]["mean_latency_ms"]
+    speedup  = rate_0 / max(rate_100, 0.1)
+    print(f"\nKey finding:")
+    print(f"  0% repetition  → {rate_0:.0f}ms mean latency")
+    print(f"  100% repetition → {rate_100:.1f}ms mean latency")
+    print(f"  Speedup at 100% hit rate: {speedup:.0f}x")
+
+
+if __name__ == "__main__":
+    main()
