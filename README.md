@@ -53,6 +53,17 @@ python quickstart.py
 python experiments/run_experiments.py --n_eval 200
 ```
 
+## Testing
+
+```bash
+# Run unit + lightweight integration tests
+pytest -q
+```
+
+These tests are mock/fake based and do not overwrite `data/` or `results/`.
+Integration coverage includes an end-to-end offline flow:
+`pipeline.run(...) -> evaluate_results(...)`.
+
 ---
 
 ## Adaptive Retrieval (V3)
@@ -77,6 +88,33 @@ Threshold default: `0.55` (tunable in `pipeline.py`).
 | Cache | Hit rate |
 
 Results are saved to `results/summaries.json` for Pareto analysis.
+
+---
+
+## Reproducible Experiment Checklist
+
+To keep experiment outputs reproducible across runs:
+
+1. Use the same dataset split and sample size (`--n_eval`).
+2. Keep model settings unchanged (`gpt-4o-mini`, `temperature=0`, same embedding model).
+3. Keep adaptive thresholds in `src/pipeline.py` unchanged.
+4. Do not modify existing files under `data/` or `results/` before comparison.
+5. Save each run's `results/summaries.json` with a timestamped copy for traceability.
+
+---
+
+## Troubleshooting
+
+- `OPENAI_API_KEY not set`
+  - Copy `.env.example` to `.env`, then set `OPENAI_API_KEY=...`.
+- `FileNotFoundError: data/chunks.json`
+  - Run `python quickstart.py` first to generate initial data files.
+- ChromaDB index seems stale or incomplete
+  - Ensure `data/chunks.json` matches your intended dataset, then rerun indexing.
+- Slow first run
+  - The first execution includes embedding/index warm-up; repeated runs should be faster.
+- No `results/summaries.json`
+  - Run `python experiments/run_experiments.py --n_eval 200` and check terminal errors.
 
 ---
 
